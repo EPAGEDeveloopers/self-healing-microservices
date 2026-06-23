@@ -1,4 +1,3 @@
-
 services:
   # MongoDB database
   mongo:
@@ -7,7 +6,7 @@ services:
     ports:
       - "27017:27017"
     volumes:
-      - mongo-data:/data/db  # Persists data even if container restarts
+      - mongo-data:/data/db
 
   # Flask API
   api:
@@ -18,7 +17,7 @@ services:
     environment:
       - MONGO_URI=mongodb://mongo:27017/appdb
     depends_on:
-      - mongo  # Ensures mongo starts before the API
+      - mongo
 
   # Background worker
   worker:
@@ -28,6 +27,15 @@ services:
       - MONGO_URI=mongodb://mongo:27017/appdb
     depends_on:
       - mongo
+
+  # Frontend — simple HTML UI served by Nginx
+  frontend:
+    build: ./frontend
+    container_name: frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
 
 volumes:
   mongo-data:

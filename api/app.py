@@ -1,15 +1,16 @@
 from flask import Flask, jsonify, request
 from pymongo import MongoClient
 from prometheus_flask_exporter import PrometheusMetrics
+from flask_cors import CORS
 import os
 
 app = Flask(__name__)
+CORS(app)  # Allows the frontend container to talk to the API
 
 # Automatically adds a /metrics endpoint for Prometheus to scrape
 metrics = PrometheusMetrics(app)
 
 # Reads MongoDB URI from environment variable
-# In Kubernetes this comes from a Secret, locally from docker-compose
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://mongo-service:27017/appdb")
 client = MongoClient(MONGO_URI)
 db = client["appdb"]
