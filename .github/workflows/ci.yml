@@ -1,0 +1,130 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # ─── JOB 1: Run Tests ───────────────────────────────────────────────────────
+  test:
+    name: Run API Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r api/requirements.txt
+
+      - name: Run pytest
+        run: |
+          pytest api/tests/ -v
+
+  # ─── JOB 2: Build & Push Docker Images ─────────────────────────────────────
+  build:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: test                        # only runs if tests pass
+
+    # Only push images on a real push to main/master, not on PRs
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build & push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./api
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/self-healing-api:latest
+
+      - name: Build & push Worker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./worker
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/self-healing-worker:latest
+
+      - name: Build & push Frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/self-healing-frontend:latest
+
+  # ─── JOB 3: Deploy with Docker Compose ─────────────────────────────────────
+  deploy:
+    name: Deploy Stack
+    runs-on: ubuntu-latest
+    needs: build                       # only runs after images are pushed
+
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Substitute image names in docker-compose.yml
+        run: |
+          sed -i "s|build: ./api|image: ${{ secrets.DOCKER_USERNAME }}/self-healing-api:latest|g" docker-compose.yml
+          sed -i "s|build: ./worker|image: ${{ secrets.DOCKER_USERNAME }}/self-healing-worker:latest|g" docker-compose.yml
+          sed -i "s|build: ./frontend|image: ${{ secrets.DOCKER_USERNAME }}/self-healing-frontend:latest|g" docker-compose.yml
+
+      - name: Start stack with Docker Compose
+        run: |
+          docker compose up -d
+
+      - name: Wait for API to be healthy
+        run: |
+          echo "Waiting for Flask API..."
+          for i in {1..15}; do
+            if curl -sf http://localhost:5000/health; then
+              echo "API is up!"
+              break
+            fi
+            echo "Attempt $i/15 — retrying in 3s..."
+            sleep 3
+          done
+
+      - name: Smoke test — health endpoint
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/health)
+          echo "Health endpoint returned: $STATUS"
+          [ "$STATUS" = "200" ] || (echo "FAILED — expected 200, got $STATUS" && exit 1)
+
+      - name: Smoke test — POST an item
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST http://localhost:5000/api/items \
+            -H "Content-Type: application/json" \
+            -d '{"name":"ci-test-item"}')
+          echo "POST /api/items returned: $STATUS"
+          [ "$STATUS" = "201" ] || (echo "FAILED — expected 201, got $STATUS" && exit 1)
+
+      - name: Smoke test — GET items
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/api/items)
+          echo "GET /api/items returned: $STATUS"
+          [ "$STATUS" = "200" ] || (echo "FAILED — expected 200, got $STATUS" && exit 1)
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose down -v
